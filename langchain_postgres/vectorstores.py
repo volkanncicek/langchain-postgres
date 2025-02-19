@@ -98,7 +98,9 @@ SUPPORTED_OPERATORS = (
 )
 
 
-def _get_embedding_collection_store(vector_dimension: Optional[int] = None, table_schema: Optional[str] = "public") -> Any:
+def _get_embedding_collection_store(
+    vector_dimension: Optional[int] = None, table_schema: Optional[str] = "public"
+) -> Any:
     global _classes
     if _classes is not None:
         return _classes
@@ -522,9 +524,11 @@ class PGVector(VectorStore):
     def create_tables_if_not_exists(self) -> None:
         with self._make_sync_session() as session:
             # Create schema if it doesn't exist
-            session.execute(sqlalchemy.text(f'CREATE SCHEMA IF NOT EXISTS {self.table_schema}'))
+            session.execute(
+                sqlalchemy.text(f"CREATE SCHEMA IF NOT EXISTS {self.table_schema}")
+            )
             session.commit()
-            
+
             # Create tables
             Base.metadata.create_all(session.get_bind())
             session.commit()
