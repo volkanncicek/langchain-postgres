@@ -29,6 +29,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.utils import get_from_dict_or_env
 from langchain_core.vectorstores import VectorStore
+from pgvector.sqlalchemy import Vector  # type: ignore
 from sqlalchemy import SQLColumnExpression, cast, create_engine, delete, func, select
 from sqlalchemy.dialects.postgresql import JSON, JSONB, JSONPATH, UUID, insert
 from sqlalchemy.engine import Connection, Engine
@@ -65,8 +66,6 @@ Base = declarative_base()  # type: Any
 _LANGCHAIN_DEFAULT_COLLECTION_NAME = "langchain"
 
 
-_classes: Any = None
-
 COMPARISONS_TO_NATIVE = {
     "$eq": "==",
     "$ne": "!=",
@@ -101,12 +100,6 @@ SUPPORTED_OPERATORS = (
 def _get_embedding_collection_store(
     vector_dimension: Optional[int] = None, table_schema: Optional[str] = "public"
 ) -> Any:
-    global _classes
-    if _classes is not None:
-        return _classes
-
-    from pgvector.sqlalchemy import Vector  # type: ignore
-
     class CollectionStore(Base):
         """Collection store."""
 
@@ -227,9 +220,7 @@ def _get_embedding_collection_store(
             {"schema": table_schema},
         )
 
-    _classes = (EmbeddingStore, CollectionStore)
-
-    return _classes
+    return (EmbeddingStore, CollectionStore)
 
 
 def _results_to_docs(docs_and_scores: Any) -> List[Document]:
