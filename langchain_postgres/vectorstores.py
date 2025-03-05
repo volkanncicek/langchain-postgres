@@ -29,7 +29,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.utils import get_from_dict_or_env
 from langchain_core.vectorstores import VectorStore
-from pgvector.sqlalchemy import Vector  # type: ignore
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import SQLColumnExpression, cast, create_engine, delete, func, select
 from sqlalchemy.dialects.postgresql import JSON, JSONB, JSONPATH, UUID, insert
 from sqlalchemy.engine import Connection, Engine
@@ -117,6 +117,7 @@ def _get_embedding_collection_store(
         raise ValueError("table_schema must be provided")
 
     # Return cached classes if available.
+    global _class_cache
     if table_schema in _class_cache:
         return _class_cache[table_schema]
 
@@ -156,24 +157,38 @@ def _get_embedding_collection_store(
     def get_or_create(
         cls, session: Session, name: str, cmetadata: Optional[dict] = None
     ) -> Tuple[Any, bool]:
-        instance = cls.get_by_name(session, name)
-        if instance:
-            return instance, False
-        instance = cls(name=name, cmetadata=cmetadata)
-        session.add(instance)
+        """Get or create a collection.
+        Returns:
+            Where the bool is True if the collection was created.
+        """  # noqa: E501
+        created = False
+        collection = cls.get_by_name(session, name)
+        if collection:
+            return collection, created
+        
+        collection = cls(name=name, cmetadata=cmetadata)
+        session.add(collection)
         session.commit()
-        return instance, True
+        created = True
+        return collection, created
 
     async def aget_or_create(
         cls, session: AsyncSession, name: str, cmetadata: Optional[dict] = None
     ) -> Tuple[Any, bool]:
-        instance = await cls.aget_by_name(session, name)
-        if instance:
-            return instance, False
-        instance = cls(name=name, cmetadata=cmetadata)
-        session.add(instance)
+        """
+        Get or create a collection.
+        Returns [Collection, bool] where the bool is True if the collection was created.
+        """  # noqa: E501
+        created = False
+        collection = await cls.aget_by_name(session, name)
+        if collection:
+            return collection, created
+        
+        collection = cls(name=name, cmetadata=cmetadata)
+        session.add(collection)
         await session.commit()
-        return instance, True
+        created = True
+        return collection, created
 
     # Attach methods as classmethods.
     setattr(collection_store, "get_by_name", classmethod(get_by_name))
@@ -265,7 +280,6 @@ class PGVector(VectorStore):
     Instantiate:
         .. code-block:: python
 
-            from langchain_postgres import PGVector
             from langchain_postgres.vectorstores import PGVector
             from langchain_openai import OpenAIEmbeddings
 
@@ -516,9 +530,7 @@ class PGVector(VectorStore):
     def create_tables_if_not_exists(self) -> None:
         with self._make_sync_session() as session:
             # Create schema if it doesn't exist
-            session.execute(
-                sqlalchemy.text(f"CREATE SCHEMA IF NOT EXISTS {self.table_schema}")
-            )
+            session.execute(sqlalchemy.text(f"CREATE SCHEMA IF NOT EXISTS {self.table_schema}"))
             session.commit()
 
             # Create tables
@@ -982,7 +994,7 @@ class PGVector(VectorStore):
         query: str,
         k: int = 4,
         filter: Optional[dict] = None,
-    ) -> List[Tuple[Document, Union[float, None]]]:
+    ) -> List[Tuple[Document, float]]:
         """Return docs most similar to query.
 
         Args:
@@ -1005,7 +1017,7 @@ class PGVector(VectorStore):
         query: str,
         k: int = 4,
         filter: Optional[dict] = None,
-    ) -> List[Tuple[Document, Union[float, None]]]:
+    ) -> List[Tuple[Document, float]]:
         """Return docs most similar to query.
 
         Args:
@@ -1042,7 +1054,7 @@ class PGVector(VectorStore):
         embedding: List[float],
         k: int = 4,
         filter: Optional[dict] = None,
-    ) -> List[Tuple[Document, Union[float, None]]]:
+    ) -> List[Tuple[Document, float]]:
         assert not self._async_engine, "This method must be called without async_mode"
         results = self.__query_collection(embedding=embedding, k=k, filter=filter)
 
@@ -1053,7 +1065,7 @@ class PGVector(VectorStore):
         embedding: List[float],
         k: int = 4,
         filter: Optional[dict] = None,
-    ) -> List[Tuple[Document, Union[float, None]]]:
+    ) -> List[Tuple[Document, float]]:
         await self.__apost_init__()  # Lazy async init
         async with self._make_async_session() as session:  # type: ignore[arg-type]
             results = await self.__aquery_collection(
@@ -1062,7 +1074,7 @@ class PGVector(VectorStore):
 
             return self._results_to_docs_and_scores(results)
 
-    def _results_to_docs_and_scores(self, results: Any) -> List[Tuple[Document, Union[float, None]]]:
+    def _results_to_docs_and_scores(self, results: Any) -> List[Tuple[Document, float]]:
         """Return docs and scores from results."""
         docs = [
             (
@@ -1883,7 +1895,7 @@ class PGVector(VectorStore):
         lambda_mult: float = 0.5,
         filter: Optional[Dict[str, str]] = None,
         **kwargs: Any,
-    ) -> List[Tuple[Document, Union[float, None]]]:
+    ) -> List[Tuple[Document, float]]:
         """Return docs selected using the maximal marginal relevance with score
             to embedding vector.
 
@@ -1929,7 +1941,7 @@ class PGVector(VectorStore):
         lambda_mult: float = 0.5,
         filter: Optional[Dict[str, str]] = None,
         **kwargs: Any,
-    ) -> List[Tuple[Document, Union[float, None]]]:
+    ) -> List[Tuple[Document, float]]:
         """Return docs selected using the maximal marginal relevance with score
             to embedding vector.
 
@@ -2055,7 +2067,7 @@ class PGVector(VectorStore):
         lambda_mult: float = 0.5,
         filter: Optional[dict] = None,
         **kwargs: Any,
-    ) -> List[Tuple[Document, Union[float, None]]]:
+    ) -> List[Tuple[Document, float]]:
         """Return docs selected using the maximal marginal relevance with score.
 
         Maximal marginal relevance optimizes for similarity to query AND diversity
@@ -2095,7 +2107,7 @@ class PGVector(VectorStore):
         lambda_mult: float = 0.5,
         filter: Optional[dict] = None,
         **kwargs: Any,
-    ) -> List[Tuple[Document, Union[float, None]]]:
+    ) -> List[Tuple[Document, float]]:
         """Return docs selected using the maximal marginal relevance with score.
 
         Maximal marginal relevance optimizes for similarity to query AND diversity
