@@ -65,6 +65,8 @@ Base = declarative_base()  # type: Any
 
 _LANGCHAIN_DEFAULT_COLLECTION_NAME = "langchain"
 
+# Global cache to store already generated classes for a given schema.
+_class_cache: Dict[str, Tuple[Type[Any], Type[Any]]] = {}
 
 COMPARISONS_TO_NATIVE = {
     "$eq": "==",
@@ -99,118 +101,90 @@ SUPPORTED_OPERATORS = (
 
 def _get_embedding_collection_store(
     vector_dimension: Optional[int] = None, table_schema: Optional[str] = "public"
-) -> Any:
-    class CollectionStore(Base):
-        """Collection store."""
+) -> Tuple[Type[Any], Type[Any]]:
+    """
+    Dynamically creates and caches two SQLAlchemy declarative classes:
+    one for the collection and one for embeddings.
 
-        __tablename__ = "langchain_pg_collection"
-        __table_args__ = {"schema": table_schema}
+    Parameters:
+        vector_dimension: The dimension of the vector column.
+        table_schema: The database schema (must be provided).
 
-        uuid = sqlalchemy.Column(
+    Returns:
+        A tuple: (EmbeddingStore, CollectionStore)
+    """
+    if not table_schema:
+        raise ValueError("table_schema must be provided")
+
+    # Return cached classes if available.
+    if table_schema in _class_cache:
+        return _class_cache[table_schema]
+
+    # Create a safe suffix from the table_schema to generate unique class names.
+    schema_suffix = table_schema.replace(" ", "_").replace("-", "_")
+    collection_class_name = f"CollectionStore_{schema_suffix}"
+    embedding_class_name = f"EmbeddingStore_{schema_suffix}"
+
+    # Define attributes for the collection store model.
+    collection_attrs = {
+        "__tablename__": "langchain_pg_collection",
+        "__table_args__": {"schema": table_schema},
+        "uuid": sqlalchemy.Column(
             UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-        )
-        name = sqlalchemy.Column(sqlalchemy.String, nullable=False, unique=True)
-        cmetadata = sqlalchemy.Column(JSON)
+        ),
+        "name": sqlalchemy.Column(sqlalchemy.String, nullable=False, unique=True),
+        "cmetadata": sqlalchemy.Column(JSON),
+    }
 
-        embeddings = relationship(
-            "EmbeddingStore",
-            back_populates="collection",
-            passive_deletes=True,
-        )
+    # Dynamically create the collection store class.
+    collection_store = type(collection_class_name, (Base,), collection_attrs)  # type: ignore
 
-        @classmethod
-        def get_by_name(
-            cls, session: Session, name: str
-        ) -> Optional["CollectionStore"]:
-            return (
-                session.query(cls)
-                .filter(typing_cast(sqlalchemy.Column, cls.name) == name)
-                .first()
-            )
-
-        @classmethod
-        async def aget_by_name(
-            cls, session: AsyncSession, name: str
-        ) -> Optional["CollectionStore"]:
-            return (
-                (
-                    await session.execute(
-                        select(CollectionStore).where(
-                            typing_cast(sqlalchemy.Column, cls.name) == name
-                        )
-                    )
-                )
-                .scalars()
-                .first()
-            )
-
-        @classmethod
-        def get_or_create(
-            cls,
-            session: Session,
-            name: str,
-            cmetadata: Optional[dict] = None,
-        ) -> Tuple["CollectionStore", bool]:
-            """Get or create a collection.
-            Returns:
-                 Where the bool is True if the collection was created.
-            """  # noqa: E501
-            created = False
-            collection = cls.get_by_name(session, name)
-            if collection:
-                return collection, created
-
-            collection = cls(name=name, cmetadata=cmetadata)
-            session.add(collection)
-            session.commit()
-            created = True
-            return collection, created
-
-        @classmethod
-        async def aget_or_create(
-            cls,
-            session: AsyncSession,
-            name: str,
-            cmetadata: Optional[dict] = None,
-        ) -> Tuple["CollectionStore", bool]:
-            """
-            Get or create a collection.
-            Returns [Collection, bool] where the bool is True if the collection was created.
-            """  # noqa: E501
-            created = False
-            collection = await cls.aget_by_name(session, name)
-            if collection:
-                return collection, created
-
-            collection = cls(name=name, cmetadata=cmetadata)
-            session.add(collection)
-            await session.commit()
-            created = True
-            return collection, created
-
-    class EmbeddingStore(Base):
-        """Embedding store."""
-
-        __tablename__ = "langchain_pg_embedding"
-
-        id = sqlalchemy.Column(
-            sqlalchemy.String, nullable=True, primary_key=True, index=True, unique=True
+    # Define instance methods for the collection store.
+    def get_by_name(cls, session: Session, name: str) -> Optional[Any]:
+        return (
+            session.query(cls)
+            .filter(typing_cast(sqlalchemy.Column, cls.name) == name)
+            .first()
         )
 
-        collection_id = sqlalchemy.Column(
-            UUID(as_uuid=True),
-            sqlalchemy.ForeignKey(
-                f"{table_schema}.{CollectionStore.__tablename__}.uuid",
-                ondelete="CASCADE",
-            ),
+    async def aget_by_name(cls, session: AsyncSession, name: str) -> Optional[Any]:
+        result = await session.execute(
+            select(cls).where(typing_cast(sqlalchemy.Column, cls.name) == name)
         )
-        collection = relationship(CollectionStore, back_populates="embeddings")
+        return result.scalars().first()
 
-        embedding: Vector = sqlalchemy.Column(Vector(vector_dimension))
-        document = sqlalchemy.Column(sqlalchemy.String, nullable=True)
-        cmetadata = sqlalchemy.Column(JSONB, nullable=True)
+    def get_or_create(
+        cls, session: Session, name: str, cmetadata: Optional[dict] = None
+    ) -> Tuple[Any, bool]:
+        instance = cls.get_by_name(session, name)
+        if instance:
+            return instance, False
+        instance = cls(name=name, cmetadata=cmetadata)
+        session.add(instance)
+        session.commit()
+        return instance, True
 
-        __table_args__ = (
+    async def aget_or_create(
+        cls, session: AsyncSession, name: str, cmetadata: Optional[dict] = None
+    ) -> Tuple[Any, bool]:
+        instance = await cls.aget_by_name(session, name)
+        if instance:
+            return instance, False
+        instance = cls(name=name, cmetadata=cmetadata)
+        session.add(instance)
+        await session.commit()
+        return instance, True
+
+    # Attach methods as classmethods.
+    setattr(collection_store, "get_by_name", classmethod(get_by_name))
+    setattr(collection_store, "aget_by_name", classmethod(aget_by_name))
+    setattr(collection_store, "get_or_create", classmethod(get_or_create))
+    setattr(collection_store, "aget_or_create", classmethod(aget_or_create))
+
+    # Define attributes for the embedding store model.
+    embedding_attrs = {
+        "__tablename__": "langchain_pg_embedding",
+        "__table_args__": (
             sqlalchemy.Index(
                 "ix_cmetadata_gin",
                 "cmetadata",
@@ -218,9 +192,36 @@ def _get_embedding_collection_store(
                 postgresql_ops={"cmetadata": "jsonb_path_ops"},
             ),
             {"schema": table_schema},
-        )
+        ),
+        "id": sqlalchemy.Column(
+            sqlalchemy.String, nullable=True, primary_key=True, index=True, unique=True
+        ),
+        "collection_id": sqlalchemy.Column(
+            UUID(as_uuid=True),
+            sqlalchemy.ForeignKey(
+                f"{table_schema}.{collection_store.__tablename__}.uuid",
+                ondelete="CASCADE",
+            ),
+        ),
+        "embedding": sqlalchemy.Column(Vector(vector_dimension)),
+        "document": sqlalchemy.Column(sqlalchemy.String, nullable=True),
+        "cmetadata": sqlalchemy.Column(JSONB, nullable=True),
+    }
 
-    return (EmbeddingStore, CollectionStore)
+    # Dynamically create the embedding store class.
+    embedding_store = type(embedding_class_name, (Base,), embedding_attrs)  # type: ignore
+
+    # Setup bidirectional relationships between the two models.
+    collection_store.embeddings = relationship(
+        embedding_store, back_populates="collection", passive_deletes=True
+    )
+    embedding_store.collection = relationship(
+        collection_store, back_populates="embeddings"
+    )
+
+    # Cache and return the generated classes.
+    _class_cache[table_schema] = (embedding_store, collection_store)
+    return embedding_store, collection_store
 
 
 def _results_to_docs(docs_and_scores: Any) -> List[Document]:
@@ -981,7 +982,7 @@ class PGVector(VectorStore):
         query: str,
         k: int = 4,
         filter: Optional[dict] = None,
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, Union[float, None]]]:
         """Return docs most similar to query.
 
         Args:
@@ -1004,7 +1005,7 @@ class PGVector(VectorStore):
         query: str,
         k: int = 4,
         filter: Optional[dict] = None,
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, Union[float, None]]]:
         """Return docs most similar to query.
 
         Args:
@@ -1041,7 +1042,7 @@ class PGVector(VectorStore):
         embedding: List[float],
         k: int = 4,
         filter: Optional[dict] = None,
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, Union[float, None]]]:
         assert not self._async_engine, "This method must be called without async_mode"
         results = self.__query_collection(embedding=embedding, k=k, filter=filter)
 
@@ -1052,7 +1053,7 @@ class PGVector(VectorStore):
         embedding: List[float],
         k: int = 4,
         filter: Optional[dict] = None,
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, Union[float, None]]]:
         await self.__apost_init__()  # Lazy async init
         async with self._make_async_session() as session:  # type: ignore[arg-type]
             results = await self.__aquery_collection(
@@ -1061,18 +1062,18 @@ class PGVector(VectorStore):
 
             return self._results_to_docs_and_scores(results)
 
-    def _results_to_docs_and_scores(self, results: Any) -> List[Tuple[Document, float]]:
+    def _results_to_docs_and_scores(self, results: Any) -> List[Tuple[Document, Union[float, None]]]:
         """Return docs and scores from results."""
         docs = [
             (
                 Document(
-                    id=str(result.EmbeddingStore.id),
-                    page_content=result.EmbeddingStore.document,
-                    metadata=result.EmbeddingStore.cmetadata,
+                    id=str(embedding_store.id),
+                    page_content=embedding_store.document,
+                    metadata=embedding_store.cmetadata,
                 ),
-                result.distance if self.embeddings is not None else None,
+                float(distance) if self.embeddings is not None else None,
             )
-            for result in results
+            for embedding_store, distance in results
         ]
         return docs
 
@@ -1882,7 +1883,7 @@ class PGVector(VectorStore):
         lambda_mult: float = 0.5,
         filter: Optional[Dict[str, str]] = None,
         **kwargs: Any,
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, Union[float, None]]]:
         """Return docs selected using the maximal marginal relevance with score
             to embedding vector.
 
@@ -1928,7 +1929,7 @@ class PGVector(VectorStore):
         lambda_mult: float = 0.5,
         filter: Optional[Dict[str, str]] = None,
         **kwargs: Any,
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, Union[float, None]]]:
         """Return docs selected using the maximal marginal relevance with score
             to embedding vector.
 
@@ -2054,7 +2055,7 @@ class PGVector(VectorStore):
         lambda_mult: float = 0.5,
         filter: Optional[dict] = None,
         **kwargs: Any,
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, Union[float, None]]]:
         """Return docs selected using the maximal marginal relevance with score.
 
         Maximal marginal relevance optimizes for similarity to query AND diversity
@@ -2094,7 +2095,7 @@ class PGVector(VectorStore):
         lambda_mult: float = 0.5,
         filter: Optional[dict] = None,
         **kwargs: Any,
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, Union[float, None]]]:
         """Return docs selected using the maximal marginal relevance with score.
 
         Maximal marginal relevance optimizes for similarity to query AND diversity
